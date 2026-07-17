@@ -254,13 +254,13 @@ JSON output:"""
         stats = {
             "total_chars": len(clean_text),
             "total_words": len(clean_text.split()),
-            "extracted_items": sum(len(v) for v in extractions.values()),
-            "decisions": len(extractions["decisions"]),
-            "insights": len(extractions["insights"]),
-            "questions": len(extractions["questions"]),
-            "tasks": len(extractions["tasks"]),
-            "concepts": len(extractions["concepts"]),
-            "entities": len(extractions["entities"]),
+            "extracted_items": sum(len(v) for v in extractions.values()) if extractions else 0,
+            "decisions": len(extractions.get("decisions", [])),
+            "insights": len(extractions.get("insights", [])),
+            "questions": len(extractions.get("questions", [])),
+            "tasks": len(extractions.get("tasks", [])),
+            "concepts": len(extractions.get("concepts", [])),
+            "entities": len(extractions.get("entities", [])),
         }
         
         # Generate document title from first heading or first sentence
@@ -425,8 +425,8 @@ JSON output:"""
             "confidence": 1.0,
             "metadata": {
                 "word_count": doc["word_count"],
-                "extracted_items": extraction_result["stats"]["extracted_items"],
-                "key_themes": extraction_result["key_themes"],
+                "extracted_items": extraction_result.get("stats", {}).get("extracted_items", 0),
+                "key_themes": extraction_result.get("key_themes", []),
             }
         }
         
