@@ -39,6 +39,7 @@ class BringMeBackEngine:
         briefing = {
             "greeting": self._generate_greeting(workspace),
             "time_away": self._calculate_time_away(),
+            "chat_activity": self._get_chat_activity(),
             "projects": self._get_project_status(),
             "new_knowledge": self._get_new_knowledge(),
             "unresolved": self._get_unresolved_items(),
@@ -67,20 +68,37 @@ class BringMeBackEngine:
         return f"Good {time_greeting}. Welcome back to {workspace.name}."
     
     def _calculate_time_away(self) -> Dict[str, Any]:
-        """Calculate how long since last activity."""
-        # Find most recent node update
+        """Calculate how long since last activity (using chat messages, not just nodes)."""
+        # Check most recent chat message
+        from models_v4 import ChatMessage
+        latest_chat = self.db.query(ChatMessage).filter(
+            ChatMessage.workspace_id == self.workspace_id
+        ).order_by(ChatMessage.created_at.desc()).first()
+        
         latest_node = self.db.query(KnowledgeNode).filter(
             KnowledgeNode.workspace_id == self.workspace_id,
             KnowledgeNode.is_archived == False
         ).order_by(KnowledgeNode.updated_at.desc()).first()
         
-        if not latest_node or not latest_node.updated_at:
+        # Use whichever is more recent
+        latest_time = None
+        if latest_chat and latest_chat.created_at:
+            latest_time = latest_chat.created_at
+        if latest_node and latest_node.updated_at:
+            if latest_time is None or latest_node.updated_at > latest_time:
+                latest_time = latest_node.updated_at
+        
+        if not latest_time:
             return {"duration": "unknown", "days": 0}
         
-        days_away = (datetime.utcnow() - latest_node.updated_at).days
+        days_away = (datetime.utcnow() - latest_time).days
+        hours_away = (datetime.utcnow() - latest_time).total_seconds() // 3600
         
         if days_away == 0:
-            duration = "today"
+            if hours_away < 1:
+                duration = "just now"
+            else:
+                duration = f"{int(hours_away)} hour{'s' if hours_away > 1 else ''}"
         elif days_away == 1:
             duration = "1 day"
         elif days_away < 7:
@@ -95,7 +113,40 @@ class BringMeBackEngine:
         return {
             "duration": duration,
             "days": days_away,
-            "last_active": latest_node.updated_at.isoformat() if latest_node.updated_at else None
+            "hours": int(hours_away),
+            "last_active": latest_time.isoformat()
+        }
+    
+    def _get_chat_activity(self) -> Dict[str, Any]:
+        """Get recent chat messages and user-taught knowledge."""
+        from models_v4 import ChatMessage
+        
+        since = self.since_date
+        recent_chat = self.db.query(ChatMessage).filter(
+            ChatMessage.workspace_id == self.workspace_id,
+            ChatMessage.created_at >= since
+        ).order_by(ChatMessage.created_at.desc()).limit(20).all()
+        
+        # Count messages
+        user_messages = [m for m in recent_chat if m.role == "user"]
+        assistant_messages = [m for m in recent_chat if m.role == "assistant"]
+        
+        # Extract topics from user messages (potential knowledge gaps)
+        topics_mentioned = []
+        for msg in user_messages:
+            # Look for capitalized phrases that might be topics
+            import re
+            found = re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,})?)\b', msg.content or "")
+            topics_mentioned.extend(found)
+        topics_mentioned = list(dict.fromkeys(topics_mentioned))[:10]
+        
+        return {
+            "total_messages": len(recent_chat),
+            "user_messages": len(user_messages),
+            "assistant_messages": len(assistant_messages),
+            "latest_message": recent_chat[0].content[:200] if recent_chat else None,
+            "latest_message_time": recent_chat[0].created_at.isoformat() if recent_chat else None,
+            "topics_mentioned": topics_mentioned
         }
     
     def _get_project_status(self) -> List[Dict[str, Any]]:
@@ -530,6 +581,18 @@ class BringMeBackEngine:
         lines.append("")
         lines.append(f"**While you were away** ({briefing['time_away']['duration']}):")
         lines.append("")
+        
+        # Chat activity summary
+        chat = briefing.get('chat_activity', {})
+        if chat.get('total_messages', 0) > 0:
+            lines.append("## Recent Chat Activity")
+            lines.append(f"- {chat.get('user_messages', 0)} messages from you")
+            lines.append(f"- {chat.get('assistant_messages', 0)} responses from Sage")
+            if chat.get('latest_message_time'):
+                lines.append(f"- Last active: {chat['latest_message_time']}")
+            if chat.get('topics_mentioned'):
+                lines.append(f"- Topics you mentioned: {', '.join(chat['topics_mentioned'][:5])}")
+            lines.append("")
         
         # New knowledge
         new = briefing['new_knowledge']

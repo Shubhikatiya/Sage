@@ -102,7 +102,7 @@ def send_message(
         if heading_match:
             user_topic = heading_match.group(1).strip()[:50]
         
-        # If no heading, use first proper noun phrase (capitalized words)
+        # If no heading, try first proper noun phrase (capitalized words)
         if not user_topic:
             proper_noun = __import__('re').search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})', message)
             if proper_noun:
@@ -112,34 +112,82 @@ def send_message(
         if not user_topic:
             user_topic = last_context_data.get("pending_topic", "")
         if not user_topic:
+            # Last resort: first 3 meaningful words (skip stop words)
+            words = [w for w in message.split() if len(w) > 2 and w.lower() not in STOP_WORDS]
+            if words:
+                user_topic = " ".join(words[:3])[:50]
+        if not user_topic:
             user_topic = "that"
         
-        # User is teaching us! Save to KG
-        try:
-            import re
-            slug = re.sub(r'[^\w\-]', '-', user_topic.lower())[:50]
-            new_node = KnowledgeNode(
-                workspace_id=workspace.id,
-                node_type_id="e3bf8bdd-050b-4dba-968c-32b0b0e0ef08",
-                slug=slug,
-                title=user_topic,
-                content=message.strip(),
-                layer="project",
-                source_type="user_taught",
-                source_id=last_context_data.get("query_id", "")
-            )
-            db.add(new_node)
-            db.commit()
-            db.refresh(new_node)
+        # Clean topic: remove control chars, box-drawing chars, excessive punctuation
+        import re
+        user_topic = re.sub(r'[\x00-\x1f\x7f-\x9f┌┐└┘├┤┬┴┼─│═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬]', '', user_topic)
+        user_topic = re.sub(r'[^\w\s\-]', '', user_topic).strip()
+        if len(user_topic) < 2:
+            user_topic = "Information"
+        
+        # Detect multiple topics: comma-separated, "and", or bullet list
+        # If message has multiple distinct capitalized terms, create nodes for each
+        topics = [user_topic]
+        multi_match = re.findall(r'\b([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,})?)\b', message)
+        if len(multi_match) >= 2 and len(message) > 50:
+            # User might be teaching about multiple things
+            topics = list(dict.fromkeys([t for t in multi_match if len(t) > 3 and t.lower() not in STOP_WORDS][:5]))
+            if not topics:
+                topics = [user_topic]
+        
+        saved_nodes = []
+        for topic in topics:
+            topic = topic.strip()[:50]
+            if len(topic) < 2:
+                continue
             
-            response_text = (
-                f"Got it. I've saved **{user_topic}** to your knowledge graph. "
-                f"You can now ask me about it anytime, and I'll recall this information."
-            )
-        except Exception as e:
-            db.rollback()
-            print(f"[KG Builder] Error saving node: {e}")
-            response_text = "I tried to save that but hit an error. Could you repeat it?"
+            slug = re.sub(r'[^\w\-]', '-', topic.lower())[:50]
+            try:
+                # Check if node already exists
+                existing = db.query(KnowledgeNode).filter(
+                    KnowledgeNode.workspace_id == workspace.id,
+                    KnowledgeNode.title.ilike(topic)
+                ).first()
+                if existing:
+                    # Update existing node content instead of creating duplicate
+                    existing.content = (existing.content or "") + f"\n\n[Updated {datetime.utcnow().strftime('%Y-%m-%d')}]: {message.strip()[:500]}"
+                    existing.updated_at = datetime.utcnow()
+                    db.commit()
+                    saved_nodes.append(topic)
+                    continue
+                
+                new_node = KnowledgeNode(
+                    workspace_id=workspace.id,
+                    node_type_id="e3bf8bdd-050b-4dba-968c-32b0b0e0ef08",
+                    slug=slug,
+                    title=topic,
+                    content=message.strip(),
+                    layer="project",
+                    source_type="user_taught",
+                    source_id=last_context_data.get("query_id", "")
+                )
+                db.add(new_node)
+                db.commit()
+                db.refresh(new_node)
+                saved_nodes.append(topic)
+            except Exception as e:
+                db.rollback()
+                print(f"[KG Builder] Error saving node for '{topic}': {e}")
+        
+        if saved_nodes:
+            if len(saved_nodes) == 1:
+                response_text = (
+                    f"Got it. I've saved **{saved_nodes[0]}** to your knowledge graph. "
+                    f"You can now ask me about it anytime, and I'll recall this information."
+                )
+            else:
+                response_text = (
+                    f"Got it. I've saved **{', '.join(saved_nodes)}** to your knowledge graph. "
+                    f"You can now ask me about any of them anytime."
+                )
+        else:
+            response_text = "I tried to save that but couldn't create the knowledge node. Could you rephrase?"
         
         # Save response (no awaiting state — conversation is complete)
         assistant_msg = ChatMessageModel(
@@ -192,14 +240,21 @@ def send_message(
     has_direct_knowledge = len(title_matches) > 0
     
     # Content search for "mentions" — shown as related context, not primary answer
+    # Filter out: extracted entities, very short titles, empty content
     content_matches = []
     if keywords and not has_direct_knowledge:
-        from sqlalchemy import or_
+        from sqlalchemy import or_, func
         content_clauses = [KnowledgeNode.content.ilike(f"%{kw}%") for kw in keywords[:3]]
         content_matches = db.query(KnowledgeNode).filter(
             KnowledgeNode.workspace_id == workspace.id,
             or_(*content_clauses),
-            KnowledgeNode.is_archived == False
+            KnowledgeNode.is_archived == False,
+            # Exclude auto-extracted fragments
+            KnowledgeNode.source_type.notin_(["extracted_entity", "asset_extraction"]),
+            # Title must be meaningful (at least 4 chars, not a fragment like "you'll")
+            func.length(KnowledgeNode.title) >= 4,
+            KnowledgeNode.title != "",
+            KnowledgeNode.title.isnot(None),
         ).limit(3).all()
     
     # Fallback context (recent nodes in the layer) — shown as supplementary info
