@@ -1,0 +1,23 @@
+﻿Sage Knowledge Architecture: 10-Layer Storage System
+
+Layer 1 - Raw Evidence (Immutable): Conversations, documents, PDFs, images, videos, audio, webpages, emails, code, screenshots, whiteboards, mind maps. Every item gets a unique ID with metadata.
+
+Layer 2 - AI Understanding: Every evidence object generates structured understanding including summary, key topics, entities, relationships, timeline, claims, evidence, contradictions, open questions, insights, action items, confidence, importance, novelty.
+
+Layer 3 - Knowledge Objects: Everything becomes a typed object. Types include Person, Project, Research Topic, Decision, Insight, Question, Book, Paper, Conversation, Experiment, Task, Habit, Goal, Organization, Skill, Technology, Framework, Meeting, Event, Idea, Principle, Mental Model.
+
+Layer 4 - Relationships: Everything connects. Relationships store source, target, type, strength, evidence, created, updated, confidence.
+
+Layer 5 - Timeline: Every object has history. Created, Updated, Reviewed, Changed, Archived. Sage remembers evolution.
+
+Layer 6 - State: Current state, goals, questions, risks, priorities, blockers, next actions, progress, health score.
+
+Layer 7 - AI Memory: Things Sage knows, unsure about, questions to ask later, predictions, recommendations, patterns, summaries.
+
+Layer 8 - Human Notes: Reflections, personal notes, journal, criticism, future ideas. Never mixed with AI writing.
+
+Layer 9 - Metadata: id, title, type, status, priority, owner, visibility, created, updated, version, tags, domains, projects, people, importance, confidence, embeddings, summary.
+
+Layer 10 - Provenance: Every statement knows where it came from. Enables answering How do we know this.
+
+Key Principle: Markdown is generated dynamically from structured knowledge. The structured graph is the source of truth.

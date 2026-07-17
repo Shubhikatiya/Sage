@@ -1,0 +1,105 @@
+# ─────────────────────────────────────────────
+# SAGE .gitignore — keeps secrets & junk OUT of git
+# ─────────────────────────────────────────────
+
+# ─── Secrets ───
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+secrets.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ─── Python / Backend ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+*.egg-info/
+dist/
+build/
+*.egg
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ─── Node / Frontend ───
+node_modules/
+.npm
+.yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# ─── Databases & Local Data ───
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+chroma_db_*/
+chroma.sqlite3
+
+# ─── Logs & Temp Files ───
+*.log
+logs/
+log/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── IDE / Editor ───
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ─── OS Files ───
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ─── Build Artifacts ───
+*.whl
+*.tar.gz
+*.zip
+
+# ─── Sage-specific generated files ───
+*.db
+sage_*.db
+output.txt
+startup_err*.txt
+import_err.txt
+check_kg.py
+verify_*.py
+test_*.py
+debug_*.py
+clean_knowledge.py
+quick_test.py
+
+# Uploads contain personal documents
+uploads/
+
+# ─── Keep example env template ───
+# (tracked separately as .env.example)
