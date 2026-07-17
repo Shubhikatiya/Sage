@@ -269,23 +269,33 @@ def send_message(
             context = "\n\n".join(context_parts)
 
             # ─── KNOWLEDGE-FIRST PATH ───
-            # If we found a node whose TITLE matches the query, answer directly.
-            # Content-only matches (mentions) trigger the conversational builder.
+            # If we found a node whose TITLE matches the query, traverse the graph
+            # to collect connected nodes and produce an enriched summary.
             if has_direct_knowledge:
-                # Direct title match — answer from the knowledge graph
+                # Direct title match — fetch the whole subgraph, not just the node
+                from sage.core.extraction.graph_traversal import get_enriched_answer
                 node = title_matches[0]  # best title match
-                answer_lines = [f"From your knowledge graph, here's what I know about **{node.title}**:"]
-                if node.content and len(node.content) > 10:
-                    answer_lines.append(node.content)
-                else:
-                    answer_lines.append("(No detailed content stored for this node.)")
                 
-                # Mention related nodes if any
+                try:
+                    response_text = get_enriched_answer(
+                        db=db,
+                        workspace_id=workspace.id,
+                        query_text=message,
+                        matched_node=node,
+                        max_hops=2
+                    )
+                except Exception as e:
+                    print(f"[Chat] Graph traversal error: {e}")
+                    # Fallback to simple answer
+                    response_text = (
+                        f"From your knowledge graph, here's what I know about **{node.title}**:\n\n"
+                        f"{node.content or '(No detailed content stored for this node.)'}"
+                    )
+                
+                # If there are other title matches, mention them
                 if len(title_matches) > 1:
                     related = [n.title for n in title_matches[1:3]]
-                    answer_lines.append(f"\nRelated: {', '.join(related)}")
-                
-                response_text = "\n\n".join(answer_lines)
+                    response_text += f"\n\nOther matches: {', '.join(related)}"
             
             elif content_matches:
                 # The topic is MENTIONED in other nodes but has no dedicated node.
