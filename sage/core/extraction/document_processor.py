@@ -306,48 +306,22 @@ class DocumentProcessor:
         self.db.add(doc_node)
         self.db.flush()  # Get ID assigned
         
-        # Step 5: Create entity nodes
+        # Step 5: Create entity nodes (SKIP — store as metadata only to prevent KB clutter)
+        # Entities are stored in ai_entities field of the document node.
+        # We only create edges if the entity already exists as a manual node.
         entity_nodes = {}
-        entity_type_map = {
-            "person": ("person", "Person"),
-            "organization": ("organization", "Organization"),
-            "project": ("project", "Project"),
-            "technology": ("technology", "Technology"),
-            "goal": ("goal", "Goal"),
-            "deadline": ("deadline", "Deadline"),
-        }
-        
         for entity in entities:
-            slug, name = entity_type_map.get(entity["type"], ("concept", "Concept"))
-            nt_id = self._get_or_create_node_type(slug, name)
-            
-            ent_id = str(uuid.uuid4())
-            ent_slug = re.sub(r'[^\w\-]', '-', entity["canonical"].lower())[:50] or f"ent-{ent_id[:8]}"
-            
-            ent_node = KnowledgeNode(
-                id=ent_id,
-                workspace_id=self.workspace_id,
-                node_type_id=nt_id,
-                slug=ent_slug,
-                title=entity["canonical"],
-                content=entity.get("sentence", ""),
-                layer="project",
-                status="active",
-                source_type="extracted_entity",
-                source_id=doc_id,
-                ai_short_summary=entity.get("sentence", "")[:200],
-                ai_keywords=[entity["type"]],
-                ai_entities=[entity],
-                ai_importance_score=entity["confidence"],
-            )
-            self.db.add(ent_node)
-            self.db.flush()
-            entity_nodes[entity["canonical"].lower()] = ent_id
+            # Check if a manual node with this name already exists
+            existing = self.db.query(KnowledgeNode).filter(
+                KnowledgeNode.workspace_id == self.workspace_id,
+                KnowledgeNode.title.ilike(entity["canonical"]),
+                KnowledgeNode.is_archived == False,
+                KnowledgeNode.source_type.not_in(["extracted_entity", "asset_extraction"])
+            ).first()
+            if existing:
+                entity_nodes[entity["canonical"].lower()] = existing.id
         
-        # Step 6: Create edges (document -> entities, entity -> entity)
-        edges_created = 0
-        
-        # Document contains entities
+        # Create edges to existing manual nodes only
         for entity in entities:
             ent_id = entity_nodes.get(entity["canonical"].lower())
             if ent_id:
@@ -356,31 +330,15 @@ class DocumentProcessor:
                     workspace_id=self.workspace_id,
                     source_id=doc_id,
                     target_id=ent_id,
-                    evidence=f"Extracted from document: {title}",
+                    evidence=f"Mentioned in: {title}",
                     confidence=entity["confidence"],
                     weight=1.0,
-                    notes="Auto-extracted entity"
+                    notes="Auto-extracted mention"
                 )
                 self.db.add(edge)
-                edges_created += 1
         
-        # Entity relationships
-        for rel in relations:
-            src_id = entity_nodes.get(rel["source_text"].lower())
-            tgt_id = entity_nodes.get(rel["target_text"].lower())
-            if src_id and tgt_id:
-                edge = KnowledgeEdgeModel(
-                    id=str(uuid.uuid4()),
-                    workspace_id=self.workspace_id,
-                    source_id=src_id,
-                    target_id=tgt_id,
-                    evidence=rel.get("evidence", ""),
-                    confidence=rel["confidence"],
-                    weight=1.0,
-                    notes=f"Relation: {rel['relation_label']}"
-                )
-                self.db.add(edge)
-                edges_created += 1
+        # Step 6: Skip relation edges — no entity nodes created
+        # Relations are stored as metadata only (ai_entities contains relation info)
         
         self.db.commit()
         

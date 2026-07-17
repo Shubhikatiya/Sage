@@ -206,7 +206,8 @@ class EntityManager:
         """Search nodes with filters."""
         q = self.db.query(KnowledgeNode).filter(
             KnowledgeNode.workspace_id == self.workspace_id,
-            KnowledgeNode.is_archived == False
+            KnowledgeNode.is_archived == False,
+            KnowledgeNode.source_type.not_in(["extracted_entity", "asset_extraction"])
         )
         
         if query:
@@ -241,5 +242,6 @@ class EntityManager:
         return self.db.query(KnowledgeNode).filter(
             KnowledgeNode.workspace_id == self.workspace_id,
             KnowledgeNode.node_type_id == node_type.id,
-            KnowledgeNode.is_archived == False
+            KnowledgeNode.is_archived == False,
+            KnowledgeNode.source_type.not_in(["extracted_entity", "asset_extraction"])
         ).order_by(KnowledgeNode.updated_at.desc()).all()
