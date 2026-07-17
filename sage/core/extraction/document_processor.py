@@ -226,12 +226,12 @@ class DocumentProcessor:
         self.workspace_id = workspace_id
         self._node_type_cache = {}
     
-    def _get_or_create_node_type(self, slug: str, name: str) -> str:
-        """Get or create a NodeType by slug. Returns the ID."""
+    def _get_or_create_node_type(self, slug: str, display_name: str) -> str:
+        """Get or create a NodeType by name. Returns the ID."""
         if slug in self._node_type_cache:
             return self._node_type_cache[slug]
         
-        nt = self.db.query(NodeType).filter(NodeType.slug == slug).first()
+        nt = self.db.query(NodeType).filter(NodeType.name == slug).first()
         if nt:
             self._node_type_cache[slug] = nt.id
             return nt.id
@@ -241,9 +241,9 @@ class DocumentProcessor:
         nt = NodeType(
             id=nt_id,
             workspace_id=self.workspace_id,
-            slug=slug,
-            name=name,
-            description=f"Auto-created node type for {name}"
+            name=slug,
+            display_name=display_name,
+            description=f"Auto-created node type for {display_name}"
         )
         self.db.add(nt)
         self.db.commit()

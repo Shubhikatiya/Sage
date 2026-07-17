@@ -15,16 +15,6 @@ def _get_connected_nodes(db: Session, workspace_id: str, node_id: str, max_hops:
                          min_edge_confidence: float = 0.0) -> List[Dict[str, Any]]:
     """
     Traverse the knowledge graph from a starting node, collecting connected nodes.
-
-    Args:
-        db: SQLAlchemy session
-        workspace_id: workspace scope
-        node_id: starting node ID
-        max_hops: how many hops to traverse (1 = direct neighbors, 2 = neighbors of neighbors)
-        min_edge_confidence: filter out low-confidence edges
-
-    Returns:
-        List of node dicts with distance from origin
     """
     visited = {node_id: 0}
     queue = [(node_id, 0)]
@@ -35,7 +25,6 @@ def _get_connected_nodes(db: Session, workspace_id: str, node_id: str, max_hops:
         if distance >= max_hops:
             continue
         
-        # Find edges from current node
         edges = db.query(KnowledgeEdge).filter(
             KnowledgeEdge.workspace_id == workspace_id,
             KnowledgeEdge.is_archived == False,
@@ -47,14 +36,12 @@ def _get_connected_nodes(db: Session, workspace_id: str, node_id: str, max_hops:
         ).all()
         
         for edge in edges:
-            # Get the other end of the edge
             other_id = edge.target_id if edge.source_id == current_id else edge.source_id
             
             if other_id not in visited:
                 visited[other_id] = distance + 1
                 queue.append((other_id, distance + 1))
                 
-                # Fetch the actual node
                 node = db.query(KnowledgeNode).filter(
                     KnowledgeNode.id == other_id,
                     KnowledgeNode.workspace_id == workspace_id,
@@ -75,7 +62,6 @@ def _get_connected_nodes(db: Session, workspace_id: str, node_id: str, max_hops:
                         "relation_notes": edge.notes or "",
                     })
     
-    # Also include the origin node
     origin = db.query(KnowledgeNode).filter(
         KnowledgeNode.id == node_id,
         KnowledgeNode.workspace_id == workspace_id
@@ -95,13 +81,11 @@ def _get_connected_nodes(db: Session, workspace_id: str, node_id: str, max_hops:
             "relation_notes": "Origin node",
         })
     
-    # Sort by distance (closest first) then by edge confidence
     collected.sort(key=lambda x: (x["distance"], -x["edge_confidence"]))
     return collected
 
 
 def _deduplicate_nodes(nodes: List[Dict]) -> List[Dict]:
-    """Remove duplicate nodes by ID, keeping the closest instance."""
     seen = {}
     for n in nodes:
         nid = n["id"]
@@ -111,9 +95,6 @@ def _deduplicate_nodes(nodes: List[Dict]) -> List[Dict]:
 
 
 def _build_context_text(nodes: List[Dict], origin_title: str) -> str:
-    """
-    Build a rich context text from collected nodes for summarization.
-    """
     parts = []
     parts.append(f"# Knowledge Subgraph for: {origin_title}\n")
     
@@ -137,22 +118,6 @@ def _build_context_text(nodes: List[Dict], origin_title: str) -> str:
 
 def summarize_subgraph(db: Session, workspace_id: str, node_id: str,
                        max_hops: int = 2, min_edge_confidence: float = 0.0) -> Dict[str, Any]:
-    """
-    Traverse the knowledge graph from a node and produce a summary.
-
-    Returns:
-        {
-            "origin_node_id": str,
-            "origin_title": str,
-            "total_nodes_collected": int,
-            "nodes": [ {...}, ... ],
-            "context_text": str,      # Raw assembled context for LLM
-            "summary": str,           # Formatted summary (if no LLM, uses heuristic)
-            "key_entities": [str],
-            "key_relationships": [str],
-        }
-    """
-    # Step 1: Get origin node info
     origin = db.query(KnowledgeNode).filter(
         KnowledgeNode.id == node_id,
         KnowledgeNode.workspace_id == workspace_id
@@ -161,17 +126,13 @@ def summarize_subgraph(db: Session, workspace_id: str, node_id: str,
     if not origin:
         return {"error": "Origin node not found", "origin_node_id": node_id}
     
-    # Step 2: Traverse graph
     raw_nodes = _get_connected_nodes(db, workspace_id, node_id, max_hops, min_edge_confidence)
     nodes = _deduplicate_nodes(raw_nodes)
     
-    # Step 3: Build context text
     context_text = _build_context_text(nodes, origin.title)
     
-    # Step 4: Generate summary (heuristic if no LLM available)
     summary_parts = [f"Based on your knowledge graph, here's everything connected to **{origin.title}**:"]
     
-    # Group by distance
     by_distance = {}
     for n in nodes:
         by_distance.setdefault(n["distance"], []).append(n)
@@ -222,37 +183,30 @@ def get_enriched_answer(db: Session, workspace_id: str, query_text: str,
                         matched_node: KnowledgeNode, max_hops: int = 2) -> str:
     """
     Generate an enriched answer for chat by traversing from a matched node.
-    This is what Sage calls when a node is matched — it doesn't just return
-    the node's content, it fetches the whole subgraph and summarizes it.
     """
     result = summarize_subgraph(db, workspace_id, matched_node.id, max_hops=max_hops)
     
     if "error" in result:
-        return f"From your knowledge graph, here's what I know about **{matched_node.title}**:\n\n{matched_node.content or '(No content stored)'}")
+        return f"From your knowledge graph, here's what I know about **{matched_node.title}**:\n\n{matched_node.content or '(No content stored)'}"
     
-    # Build a rich, conversational response
     lines = [
         f"From your knowledge graph, here's what I know about **{matched_node.title}**:",
     ]
     
-    # Add origin content
     if matched_node.content and len(matched_node.content) > 10:
         lines.append(f"\n{matched_node.content[:800]}")
     
-    # Add connected context
     if result["key_entities"]:
         lines.append(f"\n**Connected to ({len(result['key_entities'])} nodes):**")
         for entity in result["key_entities"][:8]:
             lines.append(f"  - {entity}")
     
-    # Add relation evidence if available
     relation_notes = [r for r in result["key_relationships"] if r and r != "Origin node"]
     if relation_notes:
         lines.append(f"\n**Key relationships:**")
         for note in relation_notes[:5]:
             lines.append(f"  - {note}")
     
-    # Suggest questions
     if matched_node.ai_suggested_questions:
         questions = matched_node.ai_suggested_questions
         if isinstance(questions, list) and len(questions) > 0:
