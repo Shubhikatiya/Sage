@@ -101,5 +101,19 @@ quick_test.py
 # Uploads contain personal documents
 uploads/
 
+# Personal finance / funding docs (contain sensitive data)
+personal_finance.md
+sage_funding.md
+
+# Outdated plans that contradict actual implementation
+01_product/IMPLEMENTATION_PLAN.md
+
+# Gap analysis docs that contain personal info + Windows paths
+SAGE_IMPLEMENTATION_GAP_ANALYSIS.md
+SAGE_REVISED_GAP_ANALYSIS.md
+
+# Temp commit message file
+COMMIT_MSG.txt
+
 # ─── Keep example env template ───
 # (tracked separately as .env.example)

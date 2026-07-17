@@ -54,6 +54,10 @@ def send_message(
     db.add(user_msg)
     db.commit()
 
+    # ─── Conversational state tracking ───
+    # context_data_out: what we'll save WITH the assistant's response
+    context_data_out = {}
+
     # Get recent messages for context
     recent_messages = db.query(ChatMessageModel).filter(
         ChatMessageModel.workspace_id == workspace.id
@@ -73,6 +77,72 @@ def send_message(
     except Exception as e:
         print(f"[MemoryEngine] Failed to retrieve memories: {e}")
 
+    # ─── CHECK CONVERSATIONAL STATE FIRST ───
+    # Only trigger if the assistant's LAST message (just before this user message)
+    # was explicitly asking for knowledge. This prevents stale states from old
+    # conversations or test runs from interfering.
+    last_two_messages = db.query(ChatMessageModel).filter(
+        ChatMessageModel.workspace_id == workspace.id
+    ).order_by(ChatMessageModel.created_at.desc()).limit(2).all()
+    
+    last_context_data = {}
+    if len(last_two_messages) >= 2:
+        prev_msg = last_two_messages[1]  # message before the current user message
+        if prev_msg.role == "assistant" and prev_msg.context_data:
+            import json
+            last_context_data = prev_msg.context_data if isinstance(prev_msg.context_data, dict) else json.loads(prev_msg.context_data) if prev_msg.context_data else {}
+    
+    if last_context_data.get("sage_state") == "awaiting_knowledge":
+        pending_topic = last_context_data.get("pending_topic", "")
+        if pending_topic:
+            # User is teaching us! Save to KG
+            try:
+                import re
+                slug = re.sub(r'[^\w\-]', '-', pending_topic.lower())[:50]
+                new_node = KnowledgeNode(
+                    workspace_id=workspace.id,
+                    node_type_id="e3bf8bdd-050b-4dba-968c-32b0b0e0ef08",
+                    slug=slug,
+                    title=pending_topic,
+                    content=message.strip(),
+                    layer="project",
+                    source_type="user_taught",
+                    source_id=last_context_data.get("query_id", "")
+                )
+                db.add(new_node)
+                db.commit()
+                db.refresh(new_node)
+                
+                response_text = (
+                    f"Got it. I've saved **{pending_topic}** to your knowledge graph. "
+                    f"You can now ask me about it anytime, and I'll recall this information."
+                )
+            except Exception as e:
+                db.rollback()
+                print(f"[KG Builder] Error saving node: {e}")
+                response_text = "I tried to save that but hit an error. Could you repeat it?"
+        else:
+            response_text = "I was going to ask about something, but I lost track. What would you like to tell me about?"
+        
+        # Save response (no awaiting state — conversation is complete)
+        assistant_msg = ChatMessageModel(
+            workspace_id=workspace.id,
+            layer=layer,
+            role="assistant",
+            content=response_text
+        )
+        db.add(assistant_msg)
+        db.commit()
+        
+        return {
+            "success": True,
+            "data": {
+                "message": response_text,
+                "layer": layer,
+                "timestamp": assistant_msg.created_at.isoformat() if assistant_msg.created_at else None
+            }
+        }
+
     # Build context from knowledge graph — search ALL nodes for keywords in the message
     context_nodes = []
     msg_lower = message.lower()
@@ -88,6 +158,7 @@ def send_message(
     keywords = sorted(keywords, key=len, reverse=True)
     
     # PRIORITY 1: Title contains any keyword (use up to 3 longest)
+    title_matches = []
     if keywords:
         from sqlalchemy import or_
         title_clauses = [KnowledgeNode.title.ilike(f"%{kw}%") for kw in keywords[:3]]
@@ -98,8 +169,14 @@ def send_message(
         ).all()
         context_nodes.extend(title_matches)
     
-    # PRIORITY 2: Content contains keyword (only if no title matches)
-    if keywords and not context_nodes:
+    # ─── DECISION: Do we have DIRECT knowledge? ───
+    # Only title matches count as "real knowledge" about the topic.
+    # Content matches (where the topic is just mentioned) trigger the builder.
+    has_direct_knowledge = len(title_matches) > 0
+    
+    # Content search for "mentions" — shown as related context, not primary answer
+    content_matches = []
+    if keywords and not has_direct_knowledge:
         from sqlalchemy import or_
         content_clauses = [KnowledgeNode.content.ilike(f"%{kw}%") for kw in keywords[:3]]
         content_matches = db.query(KnowledgeNode).filter(
@@ -107,21 +184,19 @@ def send_message(
             or_(*content_clauses),
             KnowledgeNode.is_archived == False
         ).limit(3).all()
-        context_nodes.extend(content_matches)
     
-    # Also fetch layer-specific nodes as fallback
+    # Fallback context (recent nodes in the layer) — shown as supplementary info
+    fallback_nodes = []
     if layer == "project":
-        project_nodes = db.query(KnowledgeNode).filter(
+        fallback_nodes = db.query(KnowledgeNode).filter(
             KnowledgeNode.workspace_id == workspace.id,
             KnowledgeNode.is_archived == False
         ).order_by(KnowledgeNode.updated_at.desc()).limit(5).all()
-        context_nodes = list(dict.fromkeys(context_nodes + project_nodes))  # dedupe
     elif layer == "life":
-        person_nodes = db.query(KnowledgeNode).filter(
+        fallback_nodes = db.query(KnowledgeNode).filter(
             KnowledgeNode.workspace_id == workspace.id,
             KnowledgeNode.is_archived == False
         ).limit(5).all()
-        context_nodes = list(dict.fromkeys(context_nodes + person_nodes))
 
     # Try to use LLM service if available
     response_text = ""
@@ -194,68 +269,79 @@ def send_message(
             context = "\n\n".join(context_parts)
 
             # ─── KNOWLEDGE-FIRST PATH ───
-            # If we found knowledge graph nodes, answer directly from them.
-            # The 1.5B model can't reliably follow "use only context" instructions,
-            # so we format the answer ourselves and skip the LLM call.
-            if context_nodes:
-                # Build a clean, direct answer from the knowledge graph
-                node = context_nodes[0]  # best match
+            # If we found a node whose TITLE matches the query, answer directly.
+            # Content-only matches (mentions) trigger the conversational builder.
+            if has_direct_knowledge:
+                # Direct title match — answer from the knowledge graph
+                node = title_matches[0]  # best title match
                 answer_lines = [f"From your knowledge graph, here's what I know about **{node.title}**:"]
                 if node.content and len(node.content) > 10:
                     answer_lines.append(node.content)
                 else:
                     answer_lines.append("(No detailed content stored for this node.)")
                 
-                # If there are related nodes, mention them
-                if len(context_nodes) > 1:
-                    related = [n.title for n in context_nodes[1:3]]
+                # Mention related nodes if any
+                if len(title_matches) > 1:
+                    related = [n.title for n in title_matches[1:3]]
                     answer_lines.append(f"\nRelated: {', '.join(related)}")
                 
                 response_text = "\n\n".join(answer_lines)
-            else:
-                # No KG match — fall back to LLM for general knowledge
-                # Build prompt with conversation history
-                history_parts = []
-                for msg in recent_messages[-5:]:
-                    prefix = "User" if msg.role == "user" else "Sage"
-                    history_parts.append(f"{prefix}: {msg.content}")
-
-                history_text = "\n".join(history_parts)
-                full_prompt = message
-                if history_text:
-                    full_prompt = f"Previous conversation:\n{history_text}\n\nCurrent message: {message}"
-
-                # Direct Ollama HTTP call with strict timeout — uses local Ollama
-                import os, requests
-                ollama_url = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434').rstrip('/') + '/api/chat'
-                ollama_model = os.environ.get('OLLAMA_MODEL', 'llama3.2:1b')
-                system_msg = "You are Sage, the user's AI Chief of Staff."
+            
+            elif content_matches:
+                # The topic is MENTIONED in other nodes but has no dedicated node.
+                # Show a contextual hint and trigger the builder.
+                mentioned_in = content_matches[0]
+                hint = (
+                    f"I found mentions of that in **{mentioned_in.title}**, "
+                    f"but I don't have a dedicated entry yet.\n\n"
+                    f"Would you like to tell me about it? Just reply with what you know — "
+                    f"I'll create a knowledge node so I can answer properly next time."
+                )
                 
-                try:
-                    resp = requests.post(
-                        ollama_url,
-                        json={
-                            "model": ollama_model,
-                            "messages": [
-                                {"role": "system", "content": system_msg},
-                                {"role": "user", "content": full_prompt}
-                            ],
-                            "options": {"temperature": 0.7, "num_predict": 500, "top_p": 0.9},
-                            "stream": False
-                        },
-                        timeout=20
+                # Set up conversational state
+                import uuid
+                query_id = str(uuid.uuid4())[:8]
+                context_data_out["sage_state"] = "awaiting_knowledge"
+                context_data_out["pending_topic"] = keywords[0].capitalize() if keywords else "that"
+                context_data_out["query_id"] = query_id
+                
+                response_text = hint
+            
+            else:
+                # ─── NO DIRECT KNOWLEDGE, NO CONTENT MENTIONS ───
+                # Completely unknown topic. Ask the user to teach us.
+                import uuid
+                query_id = str(uuid.uuid4())[:8]
+                
+                topic_guess = ""
+                if keywords:
+                    topic_guess = keywords[0].capitalize()
+                
+                if topic_guess:
+                    response_text = (
+                        f"I don't have anything about **{topic_guess}** in your knowledge graph yet.\n\n"
+                        f"Would you like to tell me about it? "
+                        f"Just reply with what you know — I'll remember it for next time."
                     )
-                    if resp.status_code == 200:
-                        response_text = resp.json().get("message", {}).get("content", "").strip()
-                    else:
-                        print(f"[Chat] Ollama returned {resp.status_code}")
-                        response_text = ""
-                except Exception as e:
-                    print(f"[Chat] Ollama call error: {e}")
-                    response_text = ""
+                else:
+                    response_text = (
+                        "I don't have anything about that in your knowledge graph yet.\n\n"
+                        "Would you like to tell me about it? "
+                        "Just reply with what you know — I'll remember it for next time."
+                    )
+                
+                context_data_out["sage_state"] = "awaiting_knowledge"
+                context_data_out["pending_topic"] = topic_guess
+                context_data_out["query_id"] = query_id
 
     except Exception as e:
-        print(f"[Chat] LLM service error: {e}")
+        import traceback
+        print(f"[Chat] ERROR: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        try:
+            db.rollback()
+        except:
+            pass
         response_text = ""
 
     if not response_text:
@@ -269,12 +355,13 @@ def send_message(
         }
         response_text = layer_responses.get(layer, layer_responses["general"])
 
-    # Save assistant response
+    # Save assistant response WITH conversational state
     assistant_msg = ChatMessageModel(
         workspace_id=workspace.id,
         layer=layer,
         role="assistant",
-        content=response_text
+        content=response_text,
+        context_data=context_data_out if context_data_out else None
     )
     db.add(assistant_msg)
     db.commit()
