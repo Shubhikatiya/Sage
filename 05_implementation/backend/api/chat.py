@@ -93,36 +93,53 @@ def send_message(
             last_context_data = prev_msg.context_data if isinstance(prev_msg.context_data, dict) else json.loads(prev_msg.context_data) if prev_msg.context_data else {}
     
     if last_context_data.get("sage_state") == "awaiting_knowledge":
-        pending_topic = last_context_data.get("pending_topic", "")
-        if pending_topic:
-            # User is teaching us! Save to KG
-            try:
-                import re
-                slug = re.sub(r'[^\w\-]', '-', pending_topic.lower())[:50]
-                new_node = KnowledgeNode(
-                    workspace_id=workspace.id,
-                    node_type_id="e3bf8bdd-050b-4dba-968c-32b0b0e0ef08",
-                    slug=slug,
-                    title=pending_topic,
-                    content=message.strip(),
-                    layer="project",
-                    source_type="user_taught",
-                    source_id=last_context_data.get("query_id", "")
-                )
-                db.add(new_node)
-                db.commit()
-                db.refresh(new_node)
-                
-                response_text = (
-                    f"Got it. I've saved **{pending_topic}** to your knowledge graph. "
-                    f"You can now ask me about it anytime, and I'll recall this information."
-                )
-            except Exception as e:
-                db.rollback()
-                print(f"[KG Builder] Error saving node: {e}")
-                response_text = "I tried to save that but hit an error. Could you repeat it?"
-        else:
-            response_text = "I was going to ask about something, but I lost track. What would you like to tell me about?"
+        # Extract topic from USER'S message, not the stale pending_topic
+        # User might teach us about something completely different
+        user_topic = ""
+        
+        # Try to extract a heading: "# Topic" or "## Topic"
+        heading_match = __import__('re').search(r'^#+\s*(.+)$', message.strip(), __import__('re').MULTILINE)
+        if heading_match:
+            user_topic = heading_match.group(1).strip()[:50]
+        
+        # If no heading, use first proper noun phrase (capitalized words)
+        if not user_topic:
+            proper_noun = __import__('re').search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})', message)
+            if proper_noun:
+                user_topic = proper_noun.group(1).strip()[:50]
+        
+        # Fallback to pending_topic or generic
+        if not user_topic:
+            user_topic = last_context_data.get("pending_topic", "")
+        if not user_topic:
+            user_topic = "that"
+        
+        # User is teaching us! Save to KG
+        try:
+            import re
+            slug = re.sub(r'[^\w\-]', '-', user_topic.lower())[:50]
+            new_node = KnowledgeNode(
+                workspace_id=workspace.id,
+                node_type_id="e3bf8bdd-050b-4dba-968c-32b0b0e0ef08",
+                slug=slug,
+                title=user_topic,
+                content=message.strip(),
+                layer="project",
+                source_type="user_taught",
+                source_id=last_context_data.get("query_id", "")
+            )
+            db.add(new_node)
+            db.commit()
+            db.refresh(new_node)
+            
+            response_text = (
+                f"Got it. I've saved **{user_topic}** to your knowledge graph. "
+                f"You can now ask me about it anytime, and I'll recall this information."
+            )
+        except Exception as e:
+            db.rollback()
+            print(f"[KG Builder] Error saving node: {e}")
+            response_text = "I tried to save that but hit an error. Could you repeat it?"
         
         # Save response (no awaiting state — conversation is complete)
         assistant_msg = ChatMessageModel(
@@ -318,31 +335,93 @@ def send_message(
                 response_text = hint
             
             else:
-                # ─── NO DIRECT KNOWLEDGE, NO CONTENT MENTIONS ───
-                # Completely unknown topic. Ask the user to teach us.
-                import uuid
-                query_id = str(uuid.uuid4())[:8]
+                # ─── NO KG MATCH — USE GROQ/OPENAI FOR GENERAL KNOWLEDGE ───
+                import os
+                provider = os.environ.get("LLM_PROVIDER", "ollama")
                 
-                topic_guess = ""
-                if keywords:
-                    topic_guess = keywords[0].capitalize()
+                response_text = ""
                 
-                if topic_guess:
-                    response_text = (
-                        f"I don't have anything about **{topic_guess}** in your knowledge graph yet.\n\n"
-                        f"Would you like to tell me about it? "
-                        f"Just reply with what you know — I'll remember it for next time."
-                    )
-                else:
-                    response_text = (
-                        "I don't have anything about that in your knowledge graph yet.\n\n"
-                        "Would you like to tell me about it? "
-                        "Just reply with what you know — I'll remember it for next time."
-                    )
+                if provider == "groq" and os.environ.get("GROQ_API_KEY"):
+                    try:
+                        import requests
+                        groq_url = "https://api.groq.com/openai/v1/chat/completions"
+                        groq_model = os.environ.get("GROQ_MODEL", "llama-3.1-70b-versatile")
+                        system_msg = "You are Sage, the user's AI Chief of Staff. Be helpful, concise, and conversational."
+                        
+                        resp = requests.post(
+                            groq_url,
+                            headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}", "Content-Type": "application/json"},
+                            json={
+                                "model": groq_model,
+                                "messages": [
+                                    {"role": "system", "content": system_msg},
+                                    {"role": "user", "content": message}
+                                ],
+                                "temperature": 0.7,
+                                "max_tokens": 800
+                            },
+                            timeout=30
+                        )
+                        if resp.status_code == 200:
+                            response_text = resp.json()["choices"][0]["message"]["content"].strip()
+                        else:
+                            print(f"[Groq] Error {resp.status_code}: {resp.text[:200]}")
+                    except Exception as e:
+                        print(f"[Groq] Exception: {e}")
                 
-                context_data_out["sage_state"] = "awaiting_knowledge"
-                context_data_out["pending_topic"] = topic_guess
-                context_data_out["query_id"] = query_id
+                elif provider == "openai" and os.environ.get("OPENAI_API_KEY"):
+                    try:
+                        import requests
+                        openai_url = "https://api.openai.com/v1/chat/completions"
+                        openai_model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+                        system_msg = "You are Sage, the user's AI Chief of Staff. Be helpful, concise, and conversational."
+                        
+                        resp = requests.post(
+                            openai_url,
+                            headers={"Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}", "Content-Type": "application/json"},
+                            json={
+                                "model": openai_model,
+                                "messages": [
+                                    {"role": "system", "content": system_msg},
+                                    {"role": "user", "content": message}
+                                ],
+                                "temperature": 0.7,
+                                "max_tokens": 800
+                            },
+                            timeout=30
+                        )
+                        if resp.status_code == 200:
+                            response_text = resp.json()["choices"][0]["message"]["content"].strip()
+                        else:
+                            print(f"[OpenAI] Error {resp.status_code}: {resp.text[:200]}")
+                    except Exception as e:
+                        print(f"[OpenAI] Exception: {e}")
+                
+                # If no LLM response or no API key configured, use knowledge builder
+                if not response_text:
+                    import uuid
+                    query_id = str(uuid.uuid4())[:8]
+                    
+                    topic_guess = ""
+                    if keywords:
+                        topic_guess = keywords[0].capitalize()
+                    
+                    if topic_guess:
+                        response_text = (
+                            f"I don't have anything about **{topic_guess}** in your knowledge graph yet.\n\n"
+                            f"Would you like to tell me about it? "
+                            f"Just reply with what you know — I'll remember it for next time."
+                        )
+                    else:
+                        response_text = (
+                            "I don't have anything about that in your knowledge graph yet.\n\n"
+                            "Would you like to tell me about it? "
+                            "Just reply with what you know — I'll remember it for next time."
+                        )
+                    
+                    context_data_out["sage_state"] = "awaiting_knowledge"
+                    context_data_out["pending_topic"] = topic_guess
+                    context_data_out["query_id"] = query_id
 
     except Exception as e:
         import traceback
