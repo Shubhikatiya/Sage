@@ -24,6 +24,12 @@ class DocumentIngestRequest(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class SemanticExtractRequest(BaseModel):
+    text: str
+    source_type: str = "chat"  # chat, document, web
+    metadata: Optional[Dict[str, Any]] = None
+
+
 @router.post("/web")
 def web_research(request: ResearchRequest):
     """
@@ -38,63 +44,25 @@ def web_research(request: ResearchRequest):
         query = request.query
         max_sources = min(request.max_sources, 10)
 
-        # DuckDuckGo HTML search (no API key required)
+        # Use DuckDuckGo HTML search (no API key needed)
         search_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-        try:
-            resp = requests.get(search_url, headers=headers, timeout=15)
-            resp.raise_for_status()
-        except Exception as e:
-            return create_response(errors=[{"message": f"Search failed: {e}", "code": "SEARCH_ERROR"}])
-
-        # Parse results
+        resp = requests.get(search_url, headers=headers, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
-        results = []
 
+        results = []
         for result in soup.select(".result")[:max_sources]:
             title_elem = result.select_one(".result__a")
             snippet_elem = result.select_one(".result__snippet")
-            url_elem = result.select_one(".result__url")
-
             if title_elem:
-                title = title_elem.get_text(strip=True)
-                url = title_elem.get("href", "")
-                # DuckDuckGo uses redirect URLs
-                if url.startswith("//"):
-                    url = "https:" + url
-                elif url.startswith("/"):
-                    url = "https://duckduckgo.com" + url
-
-                snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
-                display_url = url_elem.get_text(strip=True) if url_elem else url
-
                 results.append({
-                    "title": title,
-                    "url": url,
-                    "display_url": display_url,
-                    "snippet": snippet,
-                    "source": "web_search"
+                    "title": title_elem.get_text(strip=True),
+                    "url": title_elem.get("href", ""),
+                    "snippet": snippet_elem.get_text(strip=True) if snippet_elem else ""
                 })
 
-        # Store in research engine
-        engine = get_research_engine()
-        notebook_id = f"web_{hash(query) % 100000}"
-
-        for result in results:
-            import asyncio
-            asyncio.run(engine.ingest_document(
-                content=result["snippet"],
-                source_type=SourceType.WEB,
-                source_url=result["url"],
-                source_title=result["title"],
-                metadata={"query": query, "search_engine": "duckduckgo"}
-            ))
-
         return create_response(data={
-            "notebook_id": notebook_id,
             "query": query,
             "sources_found": len(results),
             "sources": results,
@@ -145,6 +113,62 @@ def ingest_structured_document(request: DocumentIngestRequest):
         return create_response(errors=[{"message": str(e), "code": "INGEST_ERROR"}])
 
 
+@router.post("/semantic_extract")
+def semantic_extract(request: SemanticExtractRequest):
+    """
+    Extract structured entities and relations from text using the multi-agent pipeline.
+    Phase 07+ Semantic Multi-Agent Extraction.
+    """
+    try:
+        import sys
+        sys.path.insert(0, '.')
+        from sage.core.extraction.semantic_agents import get_extraction_pipeline
+
+        pipeline = get_extraction_pipeline()
+        result = pipeline.process(request.text, request.metadata or {})
+
+        # Convert to serializable format
+        entities_data = []
+        for e in result.entities:
+            entities_data.append({
+                "text_span": e.text_span,
+                "canonical_name": e.canonical_name,
+                "entity_type": e.entity_type_label,
+                "entity_type_uri": e.entity_type_uri,
+                "confidence": e.confidence.value,
+                "vocabulary_match_score": round(e.vocabulary_match_score, 3),
+                "properties": e.properties,
+            })
+
+        relations_data = []
+        for r in result.relations:
+            relations_data.append({
+                "source": r.source_entity_text,
+                "target": r.target_entity_text,
+                "relation": r.relation_label,
+                "relation_uri": r.relation_uri,
+                "evidence": r.evidence_text[:100],
+                "confidence": r.confidence.value,
+                "vocabulary_match_score": round(r.vocabulary_match_score, 3),
+            })
+
+        return create_response(data={
+            "source_text_preview": result.source_text[:200],
+            "overall_confidence": result.overall_confidence.value,
+            "entities_extracted": len(result.entities),
+            "relations_extracted": len(result.relations),
+            "entities": entities_data,
+            "relations": relations_data,
+            "validation_summary": result.validation_summary,
+            "agent_pipeline": [log["agent"] for log in result.agent_logs],
+            "note": "Extracted using MappingAgent, RelationAgent, and ValidatorAgent with confidence scoring"
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return create_response(errors=[{"message": str(e), "code": "EXTRACTION_ERROR"}])
+
+
 @router.post("/verify")
 def verify_claim(claim_text: str):
     """Verify a claim by searching for corroborating sources."""
@@ -179,127 +203,25 @@ def verify_claim(claim_text: str):
         return create_response(errors=[{"message": str(e), "code": "VERIFY_ERROR"}])
 
 
-@router.post("/start")
-async def start_research(request: ResearchRequest):
-    """Start a new research session (legacy, kept for compatibility)."""
+@router.get("/status")
+def get_research_status():
+    """Get the current status of the research engine."""
     try:
         engine = get_research_engine()
-        notebook = await engine.start_research(request.query)
+        notebooks = list(engine.notebooks.values())
+        
+        total_sources = sum(len(n.sources) for n in notebooks)
+        total_claims = sum(len(n.claims) for n in notebooks)
+        total_edges = sum(len(n.citation_edges) for n in notebooks)
         
         return create_response(data={
-            "notebook_id": notebook.notebook_id,
-            "query": notebook.query,
-            "status": notebook.status,
-            "sources_found": len(notebook.sources),
-            "claims_extracted": len(notebook.claims),
-            "citations_found": len(notebook.citation_edges),
-            "created_at": notebook.created_at.isoformat()
+            "status": "active",
+            "notebooks": len(notebooks),
+            "total_sources": total_sources,
+            "total_claims": total_claims,
+            "total_citation_edges": total_edges,
+            "research_backends": ["duckduckgo_html"],
+            "capabilities": ["web_search", "document_ingest", "claim_verify", "semantic_extract"]
         })
     except Exception as e:
-        return create_response(errors=[{"message": str(e), "code": "RESEARCH_ERROR"}])
-
-
-@router.post("/ingest")
-async def ingest_document(request: DocumentIngestRequest):
-    """Ingest a document into the research pipeline."""
-    try:
-        engine = get_research_engine()
-        
-        try:
-            source_type = SourceType(request.source_type)
-        except ValueError:
-            source_type = SourceType.UPLOAD
-        
-        source = await engine.ingest_document(
-            content=request.content,
-            source_type=source_type,
-            metadata=request.metadata
-        )
-        
-        return create_response(data={
-            "source_id": source.source_id,
-            "source_type": source.source_type.value,
-            "title": source.title,
-            "content_length": source.raw_text_length,
-            "reputation": source.reputation.value,
-            "confidence": source.confidence_score
-        })
-    except Exception as e:
-        return create_response(errors=[{"message": str(e), "code": "INGEST_ERROR"}])
-
-
-@router.get("/notebook/{notebook_id}")
-def get_notebook(notebook_id: str):
-    """Get research notebook details."""
-    try:
-        engine = get_research_engine()
-        notebook = engine.get_notebook(notebook_id)
-        
-        if not notebook:
-            return create_response(errors=[{"message": "Notebook not found", "code": "NOT_FOUND"}])
-        
-        return create_response(data={
-            "notebook_id": notebook.notebook_id,
-            "query": notebook.query,
-            "status": notebook.status,
-            "sources": [
-                {
-                    "source_id": s.source_id,
-                    "type": s.source_type.value,
-                    "title": s.title,
-                    "url": s.url,
-                    "reputation": s.reputation.value,
-                    "confidence": s.confidence_score
-                }
-                for s in notebook.sources
-            ],
-            "claims": [
-                {
-                    "claim_id": c.claim_id,
-                    "text": c.claim_text,
-                    "source_id": c.source_id,
-                    "confidence": c.confidence,
-                    "verification": c.verification_status,
-                    "corroborated_by": len(c.corroborated_by)
-                }
-                for c in notebook.claims
-            ],
-            "citation_graph": [
-                {
-                    "source": e.source_id,
-                    "target": e.target_id,
-                    "type": e.edge_type,
-                    "confidence": e.confidence
-                }
-                for e in notebook.citation_edges
-            ]
-        })
-    except Exception as e:
-        return create_response(errors=[{"message": str(e), "code": "FETCH_ERROR"}])
-
-
-@router.get("/claim/{claim_id}/sources")
-def get_claim_sources(claim_id: str):
-    """Get sources for a specific claim."""
-    try:
-        engine = get_research_engine()
-        
-        # Find claim across all notebooks
-        for notebook in engine.notebooks.values():
-            for claim in notebook.claims:
-                if claim.claim_id == claim_id:
-                    return create_response(data={
-                        "claim_id": claim.claim_id,
-                        "claim_text": claim.claim_text,
-                        "primary_source": {
-                            "source_id": claim.source_id,
-                            "url": claim.source_url,
-                            "title": claim.source_title
-                        },
-                        "confidence": claim.confidence,
-                        "verification": claim.verification_status
-                    })
-        
-        return create_response(errors=[{"message": "Claim not found", "code": "NOT_FOUND"}])
-    except Exception as e:
-        return create_response(errors=[{"message": str(e), "code": "FETCH_ERROR"}])
+        return create_response(errors=[{"message": str(e), "code": "STATUS_ERROR"}])
