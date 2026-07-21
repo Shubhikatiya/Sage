@@ -170,6 +170,14 @@ def send_message(
                 db.add(new_node)
                 db.commit()
                 db.refresh(new_node)
+                
+                # Sync to vector store for semantic search
+                try:
+                    from services.knowledge_vector_store import sync_node
+                    sync_node(new_node)
+                except Exception as ve:
+                    print(f"[Chat] Vector sync error (non-critical): {ve}")
+                
                 saved_nodes.append(topic)
             except Exception as e:
                 db.rollback()
@@ -208,67 +216,89 @@ def send_message(
             }
         }
 
-    # Build context from knowledge graph — search ALL nodes for keywords in the message
+    # ─── SEMANTIC SEARCH: Find knowledge nodes by meaning, not just keywords ───
     context_nodes = []
-    msg_lower = message.lower()
-    
-    # Extract keywords: filter out short words and common stop words
-    STOP_WORDS = {"what", "know", "about", "this", "that", "your", "from", "with", "have", "there", "when", "where", "which", "their", "would", "could", "should", "does", "did", "will", "they", "them", "than", "then", "more", "some", "very", "just", "like", "also", "only", "even", "into", "over", "such", "make", "made", "most", "many", "other", "well", "been", "being", "time", "here", "how", "who", "whom", "whose", "why", "those", "these", "each", "every", "both", "either", "neither", "much", "little", "few", "between", "among", "through", "during", "before", "after", "above", "below", "under", "again", "further", "once", "once", "down", "off", "out", "up", "way", "own", "same", "so", "than", "too", "very", "can", "had", "has", "her", "his", "him", "its", "may", "might", "must", "shall", "were", "was", "are", "is", "am", "be", "do", "get", "got", "say", "said", "see", "seen", "come", "came", "go", "went", "take", "took", "give", "gave", "find", "found", "think", "thought", "tell", "told", "ask", "asked", "work", "worked", "try", "tried", "feel", "felt", "become", "became", "leave", "left", "put", "mean", "meant", "keep", "kept", "let", "begin", "began", "seem", "seemed", "help", "helped", "show", "showed", "hear", "heard", "play", "played", "run", "ran", "move", "moved", "live", "lived", "believe", "believed", "bring", "brought", "happen", "happened", "write", "wrote", "provide", "provided", "sit", "sat", "stand", "stood", "lose", "lost", "pay", "paid", "meet", "met", "include", "included", "continue", "continued", "set", "learn", "learned", "change", "changed", "lead", "led", "understand", "understood", "watch", "watched", "follow", "followed", "stop", "stopped", "create", "created", "speak", "spoke", "read", "allow", "allowed", "add", "added", "spend", "spent", "grow", "grew", "open", "opened", "walk", "walked", "win", "won", "offer", "offered", "remember", "remembered", "love", "loved", "consider", "considered", "appear", "appeared", "buy", "bought", "wait", "waited", "serve", "served", "die", "died", "send", "sent", "expect", "expected", "build", "built", "stay", "stayed", "fall", "fell", "cut", "reach", "reached", "kill", "killed", "remain", "remained", "suggest", "suggested", "raise", "raised", "pass", "passed", "sell", "sold", "require", "required", "report", "reported", "decide", "decided", "pull", "pulled"}
-    
-    # Extract meaningful keywords: longer than 3 chars, not a stop word
-    raw_keywords = [w.strip("?.,!;:") for w in msg_lower.split() if len(w.strip("?.,!;:")) > 3]
-    keywords = [w for w in raw_keywords if w not in STOP_WORDS]
-    
-    # Sort by length descending so most specific words are used first
-    keywords = sorted(keywords, key=len, reverse=True)
-    
-    # PRIORITY 1: Title contains any keyword (use up to 3 longest)
     title_matches = []
-    if keywords:
-        from sqlalchemy import or_
-        title_clauses = [KnowledgeNode.title.ilike(f"%{kw}%") for kw in keywords[:3]]
-        title_matches = db.query(KnowledgeNode).filter(
-            KnowledgeNode.workspace_id == workspace.id,
-            or_(*title_clauses),
-            KnowledgeNode.is_archived == False
-        ).all()
-        context_nodes.extend(title_matches)
-    
-    # ─── DECISION: Do we have DIRECT knowledge? ───
-    # Only title matches count as "real knowledge" about the topic.
-    # Content matches (where the topic is just mentioned) trigger the builder.
-    has_direct_knowledge = len(title_matches) > 0
-    
-    # Content search for "mentions" — shown as related context, not primary answer
-    # Filter out: extracted entities, very short titles, empty content
     content_matches = []
-    if keywords and not has_direct_knowledge:
-        from sqlalchemy import or_, func
-        content_clauses = [KnowledgeNode.content.ilike(f"%{kw}%") for kw in keywords[:3]]
-        content_matches = db.query(KnowledgeNode).filter(
-            KnowledgeNode.workspace_id == workspace.id,
-            or_(*content_clauses),
-            KnowledgeNode.is_archived == False,
-            # Exclude auto-extracted fragments
-            KnowledgeNode.source_type.notin_(["extracted_entity", "asset_extraction"]),
-            # Title must be meaningful (at least 4 chars, not a fragment like "you'll")
-            func.length(KnowledgeNode.title) >= 4,
-            KnowledgeNode.title != "",
-            KnowledgeNode.title.isnot(None),
-        ).limit(3).all()
-    
-    # Fallback context (recent nodes in the layer) — shown as supplementary info
     fallback_nodes = []
-    if layer == "project":
-        fallback_nodes = db.query(KnowledgeNode).filter(
-            KnowledgeNode.workspace_id == workspace.id,
-            KnowledgeNode.is_archived == False
-        ).order_by(KnowledgeNode.updated_at.desc()).limit(5).all()
-    elif layer == "life":
-        fallback_nodes = db.query(KnowledgeNode).filter(
-            KnowledgeNode.workspace_id == workspace.id,
-            KnowledgeNode.is_archived == False
-        ).limit(5).all()
+    has_direct_knowledge = False
+
+    try:
+        from services.knowledge_vector_store import semantic_search, get_collection_count
+
+        vec_count = get_collection_count()
+        if vec_count > 0:
+            semantic_results = semantic_search(
+                query_text=message,
+                workspace_id=workspace.id,
+                n_results=5
+            )
+            if semantic_results:
+                # Load full nodes from DB so graph traversal works
+                for r in semantic_results:
+                    node = db.query(KnowledgeNode).filter(
+                        KnowledgeNode.id == r["id"],
+                        KnowledgeNode.workspace_id == workspace.id,
+                        KnowledgeNode.is_archived == False
+                    ).first()
+                    if node:
+                        title_matches.append(node)
+                        context_nodes.append(node)
+                has_direct_knowledge = len(title_matches) > 0
+                print(f"[Chat] Semantic search found {len(title_matches)} matches")
+        else:
+            print("[Chat] Vector store empty, falling back to keyword search")
+    except Exception as e:
+        print(f"[Chat] Semantic search error: {e}, falling back to keyword search")
+
+    # ─── KEYWORD FALLBACK ───
+    # If semantic search failed or returned nothing, use the old keyword search
+    if not has_direct_knowledge:
+        msg_lower = message.lower()
+        STOP_WORDS = {"what", "know", "about", "this", "that", "your", "from", "with", "have", "there", "when", "where", "which", "their", "would", "could", "should", "does", "did", "will", "they", "them", "than", "then", "more", "some", "very", "just", "like", "also", "only", "even", "into", "over", "such", "make", "made", "most", "many", "other", "well", "been", "being", "time", "here", "how", "who", "whom", "whose", "why", "those", "these", "each", "every", "both", "either", "neither", "much", "little", "few", "between", "among", "through", "during", "before", "after", "above", "below", "under", "again", "further", "once", "once", "down", "off", "out", "up", "way", "own", "same", "so", "than", "too", "very", "can", "had", "has", "her", "his", "him", "its", "may", "might", "must", "shall", "were", "was", "are", "is", "am", "be", "do", "get", "got", "say", "said", "see", "seen", "come", "came", "go", "went", "take", "took", "give", "gave", "find", "found", "think", "thought", "tell", "told", "ask", "asked", "work", "worked", "try", "tried", "feel", "felt", "become", "became", "leave", "left", "put", "mean", "meant", "keep", "kept", "let", "begin", "began", "seem", "seemed", "help", "helped", "show", "showed", "hear", "heard", "play", "played", "run", "ran", "move", "moved", "live", "lived", "believe", "believed", "bring", "brought", "happen", "happened", "write", "wrote", "provide", "provided", "sit", "sat", "stand", "stood", "lose", "lost", "pay", "paid", "meet", "met", "include", "included", "continue", "continued", "set", "learn", "learned", "change", "changed", "lead", "led", "understand", "understood", "watch", "watched", "follow", "followed", "stop", "stopped", "create", "created", "speak", "spoke", "read", "allow", "allowed", "add", "added", "spend", "spent", "grow", "grew", "open", "opened", "walk", "walked", "win", "won", "offer", "offered", "remember", "remembered", "love", "loved", "consider", "considered", "appear", "appeared", "buy", "bought", "wait", "waited", "serve", "served", "die", "died", "send", "sent", "expect", "expected", "build", "built", "stay", "stayed", "fall", "fell", "cut", "reach", "reached", "kill", "killed", "remain", "remained", "suggest", "suggested", "raise", "raised", "pass", "passed", "sell", "sold", "require", "required", "report", "reported", "decide", "decided", "pull", "pulled"}
+        
+        raw_keywords = [w.strip("?.,!;:") for w in msg_lower.split() if len(w.strip("?.,!;:")) > 3]
+        keywords = [w for w in raw_keywords if w not in STOP_WORDS]
+        keywords = sorted(keywords, key=len, reverse=True)
+        
+        if keywords:
+            from sqlalchemy import or_
+            title_clauses = [KnowledgeNode.title.ilike(f"%{kw}%") for kw in keywords[:3]]
+            title_matches = db.query(KnowledgeNode).filter(
+                KnowledgeNode.workspace_id == workspace.id,
+                or_(*title_clauses),
+                KnowledgeNode.is_archived == False
+            ).all()
+            context_nodes.extend(title_matches)
+        
+        has_direct_knowledge = len(title_matches) > 0
+        
+        if keywords and not has_direct_knowledge:
+            from sqlalchemy import or_, func
+            content_clauses = [KnowledgeNode.content.ilike(f"%{kw}%") for kw in keywords[:3]]
+            content_matches = db.query(KnowledgeNode).filter(
+                KnowledgeNode.workspace_id == workspace.id,
+                or_(*content_clauses),
+                KnowledgeNode.is_archived == False,
+                KnowledgeNode.source_type.notin_(["extracted_entity", "asset_extraction"]),
+                func.length(KnowledgeNode.title) >= 4,
+                KnowledgeNode.title != "",
+                KnowledgeNode.title.isnot(None),
+            ).limit(3).all()
+    
+    # Fallback: recent nodes
+    if not context_nodes:
+        if layer == "project":
+            fallback_nodes = db.query(KnowledgeNode).filter(
+                KnowledgeNode.workspace_id == workspace.id,
+                KnowledgeNode.is_archived == False
+            ).order_by(KnowledgeNode.updated_at.desc()).limit(5).all()
+        elif layer == "life":
+            fallback_nodes = db.query(KnowledgeNode).filter(
+                KnowledgeNode.workspace_id == workspace.id,
+                KnowledgeNode.is_archived == False
+            ).limit(5).all()
+        context_nodes = fallback_nodes
 
     # Try to use LLM service if available
     response_text = ""
