@@ -54,6 +54,9 @@ def send_message(
     db.add(user_msg)
     db.commit()
 
+    # Define stop words early — used by both knowledge builder and keyword fallback
+    STOP_WORDS = {"what", "know", "about", "this", "that", "your", "from", "with", "have", "there", "when", "where", "which", "their", "would", "could", "should", "does", "did", "will", "they", "them", "than", "then", "more", "some", "very", "just", "like", "also", "only", "even", "into", "over", "such", "make", "made", "most", "many", "other", "well", "been", "being", "time", "here", "how", "who", "whom", "whose", "why", "those", "these", "each", "every", "both", "either", "neither", "much", "little", "few", "between", "among", "through", "during", "before", "after", "above", "below", "under", "again", "further", "once", "down", "off", "out", "up", "way", "own", "same", "so", "too", "can", "had", "has", "her", "his", "him", "its", "may", "might", "must", "shall", "were", "was", "are", "is", "am", "be", "do", "get", "got", "say", "said", "see", "seen", "come", "came", "go", "went", "take", "took", "give", "gave", "find", "found", "think", "thought", "tell", "told", "ask", "asked", "work", "worked", "try", "tried", "feel", "felt", "become", "became", "leave", "left", "put", "mean", "meant", "keep", "kept", "let", "begin", "began", "seem", "seemed", "help", "helped", "show", "showed", "hear", "heard", "play", "played", "run", "ran", "move", "moved", "live", "lived", "believe", "believed", "bring", "brought", "happen", "happened", "write", "wrote", "provide", "provided", "sit", "sat", "stand", "stood", "lose", "lost", "pay", "paid", "meet", "met", "include", "included", "continue", "continued", "set", "learn", "learned", "change", "changed", "lead", "led", "understand", "understood", "watch", "watched", "follow", "followed", "stop", "stopped", "create", "created", "speak", "spoke", "read", "allow", "allowed", "add", "added", "spend", "spent", "grow", "grew", "open", "opened", "walk", "walked", "win", "won", "offer", "offered", "remember", "remembered", "love", "loved", "consider", "considered", "appear", "appeared", "buy", "bought", "wait", "waited", "serve", "served", "die", "died", "send", "sent", "expect", "expected", "build", "built", "stay", "stayed", "fall", "fell", "cut", "reach", "reached", "kill", "killed", "remain", "remained", "suggest", "suggested", "raise", "raised", "pass", "passed", "sell", "sold", "require", "required", "report", "reported", "decide", "decided", "pull", "pulled"}
+
     # ─── Conversational state tracking ───
     # context_data_out: what we'll save WITH the assistant's response
     context_data_out = {}
@@ -255,8 +258,6 @@ def send_message(
     # If semantic search failed or returned nothing, use the old keyword search
     if not has_direct_knowledge:
         msg_lower = message.lower()
-        STOP_WORDS = {"what", "know", "about", "this", "that", "your", "from", "with", "have", "there", "when", "where", "which", "their", "would", "could", "should", "does", "did", "will", "they", "them", "than", "then", "more", "some", "very", "just", "like", "also", "only", "even", "into", "over", "such", "make", "made", "most", "many", "other", "well", "been", "being", "time", "here", "how", "who", "whom", "whose", "why", "those", "these", "each", "every", "both", "either", "neither", "much", "little", "few", "between", "among", "through", "during", "before", "after", "above", "below", "under", "again", "further", "once", "once", "down", "off", "out", "up", "way", "own", "same", "so", "than", "too", "very", "can", "had", "has", "her", "his", "him", "its", "may", "might", "must", "shall", "were", "was", "are", "is", "am", "be", "do", "get", "got", "say", "said", "see", "seen", "come", "came", "go", "went", "take", "took", "give", "gave", "find", "found", "think", "thought", "tell", "told", "ask", "asked", "work", "worked", "try", "tried", "feel", "felt", "become", "became", "leave", "left", "put", "mean", "meant", "keep", "kept", "let", "begin", "began", "seem", "seemed", "help", "helped", "show", "showed", "hear", "heard", "play", "played", "run", "ran", "move", "moved", "live", "lived", "believe", "believed", "bring", "brought", "happen", "happened", "write", "wrote", "provide", "provided", "sit", "sat", "stand", "stood", "lose", "lost", "pay", "paid", "meet", "met", "include", "included", "continue", "continued", "set", "learn", "learned", "change", "changed", "lead", "led", "understand", "understood", "watch", "watched", "follow", "followed", "stop", "stopped", "create", "created", "speak", "spoke", "read", "allow", "allowed", "add", "added", "spend", "spent", "grow", "grew", "open", "opened", "walk", "walked", "win", "won", "offer", "offered", "remember", "remembered", "love", "loved", "consider", "considered", "appear", "appeared", "buy", "bought", "wait", "waited", "serve", "served", "die", "died", "send", "sent", "expect", "expected", "build", "built", "stay", "stayed", "fall", "fell", "cut", "reach", "reached", "kill", "killed", "remain", "remained", "suggest", "suggested", "raise", "raised", "pass", "passed", "sell", "sold", "require", "required", "report", "reported", "decide", "decided", "pull", "pulled"}
-        
         raw_keywords = [w.strip("?.,!;:") for w in msg_lower.split() if len(w.strip("?.,!;:")) > 3]
         keywords = [w for w in raw_keywords if w not in STOP_WORDS]
         keywords = sorted(keywords, key=len, reverse=True)
@@ -375,16 +376,23 @@ def send_message(
             # to collect connected nodes and produce an enriched summary.
             if has_direct_knowledge:
                 # Direct title match — fetch the whole subgraph, not just the node
-                from sage.core.extraction.graph_traversal import get_enriched_answer
                 node = title_matches[0]  # best title match
                 
                 try:
+                    from sage.core.extraction.graph_traversal import get_enriched_answer
                     response_text = get_enriched_answer(
                         db=db,
                         workspace_id=workspace.id,
                         query_text=message,
                         matched_node=node,
                         max_hops=2
+                    )
+                except ImportError as ie:
+                    print(f"[Chat] Graph traversal import failed: {ie}")
+                    # Fallback: return node's own content directly
+                    response_text = (
+                        f"From your knowledge graph, here's what I know about **{node.title}**:\n\n"
+                        f"{node.content or '(No detailed content stored for this node.)'}"
                     )
                 except Exception as e:
                     print(f"[Chat] Graph traversal error: {e}")
