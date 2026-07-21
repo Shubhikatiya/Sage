@@ -5,6 +5,12 @@ Wires together the Capability Layer via REST API.
 import sys
 import os
 
+# Load .env file before any other imports so API keys are available
+from dotenv import load_dotenv
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(env_path):
+    load_dotenv(dotenv_path=env_path, override=True)
+
 # Add sage paths for Phase 01 imports
 SAGE_CORE = os.path.join(os.path.dirname(__file__), '..', '..', 'sage', 'core')
 SAGE_SERVICES = os.path.join(os.path.dirname(__file__), '..', '..', 'sage', 'services')
