@@ -107,6 +107,17 @@ def build_subgraph(
     
     return create_response(data=result)
 
+@router.get("/full")
+def get_full_graph(
+    max_nodes: int = 200,
+    db: Session = Depends(get_db),
+    workspace: Workspace = Depends(get_current_workspace)
+):
+    """Return the full knowledge graph for Obsidian-style visualization."""
+    service = GraphService(db, workspace.id)
+    result = service.get_full_graph(max_nodes=max_nodes)
+    return create_response(data=result)
+
 @router.get("/related/{node_id}")
 def get_related_nodes(
     node_id: str,

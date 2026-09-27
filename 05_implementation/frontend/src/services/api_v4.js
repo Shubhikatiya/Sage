@@ -34,6 +34,12 @@ export const findPath = (sourceId, targetId) => api.get('/api/graph/path', {
 })
 export const queryGraph = (query) => api.post('/api/graph/query', { query })
 export const getDegreeAnalysis = (id) => api.get(`/api/graph/degree/${id}`)
+export const getSubgraph = (nodeIds, depth = 1) => api.get('/api/graph/subgraph', {
+  params: { node_ids: Array.isArray(nodeIds) ? nodeIds.join(',') : nodeIds, depth }
+})
+export const getFullGraph = (maxNodes = 200) => api.get('/api/graph/full', {
+  params: { max_nodes: maxNodes }
+})
 
 // Workspace Operations
 export const getSidebar = () => api.get('/api/workspace/sidebar')

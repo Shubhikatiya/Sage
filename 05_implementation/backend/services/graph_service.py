@@ -142,9 +142,10 @@ class GraphService:
     
     # ── Build Subgraph ──
     def build_subgraph(self, node_ids: List[str], depth: int = 1) -> Dict[str, Any]:
-        """Extract a subgraph around specified nodes."""
+        """Extract a subgraph around specified nodes, including edges."""
         nodes = {}
         edges = []
+        edge_ids = set()
         
         for node_id in node_ids:
             node = self.db.query(KnowledgeNode).filter(
@@ -160,19 +161,136 @@ class GraphService:
                     "title": node.title,
                     "slug": node.slug,
                     "type": nt.name if nt else "unknown",
-                    "type_display": nt.display_name if nt else "Unknown"
+                    "type_display": nt.display_name if nt else "Unknown",
+                    "layer": node.layer or "project"
                 }
                 
-                # Get neighbors within depth
-                related = self.relationship_manager.get_related_nodes(node_id, max_depth=depth)
-                for rel in related:
-                    if rel["node"]["id"] not in nodes:
-                        nodes[rel["node"]["id"]] = rel["node"]
+                # BFS collect neighbors + edges
+                visited = {node_id}
+                queue = [(node_id, 0)]
+                while queue:
+                    current_id, d = queue.pop(0)
+                    if d >= depth:
+                        continue
+                    
+                    rels = self.relationship_manager.get_relationships_for_node(current_id, "both")
+                    
+                    for out in rels.get("outgoing", []):
+                        tid = out["target"]["id"]
+                        eid = out["edge_id"]
+                        if eid not in edge_ids:
+                            edge_ids.add(eid)
+                            edges.append({
+                                "id": eid,
+                                "source": current_id,
+                                "target": tid,
+                                "relationship_type": out.get("relationship_type", "related"),
+                                "relationship_display": out.get("relationship_display", "Related"),
+                                "confidence": out.get("confidence", 1.0)
+                            })
+                        if tid not in visited:
+                            visited.add(tid)
+                            nodes[tid] = {
+                                "id": tid,
+                                "title": out["target"].get("title", ""),
+                                "slug": out["target"].get("slug", ""),
+                                "type": out["target"].get("type", "unknown"),
+                                "type_display": out["target"].get("type", "Unknown"),
+                                "layer": "project"
+                            }
+                            queue.append((tid, d + 1))
+                    
+                    for inc in rels.get("incoming", []):
+                        sid = inc["source"]["id"]
+                        eid = inc["edge_id"]
+                        if eid not in edge_ids:
+                            edge_ids.add(eid)
+                            edges.append({
+                                "id": eid,
+                                "source": sid,
+                                "target": current_id,
+                                "relationship_type": inc.get("relationship_type", "related"),
+                                "relationship_display": inc.get("relationship_display", "Related"),
+                                "confidence": inc.get("confidence", 1.0)
+                            })
+                        if sid not in visited:
+                            visited.add(sid)
+                            nodes[sid] = {
+                                "id": sid,
+                                "title": inc["source"].get("title", ""),
+                                "slug": inc["source"].get("slug", ""),
+                                "type": inc["source"].get("type", "unknown"),
+                                "type_display": inc["source"].get("type", "Unknown"),
+                                "layer": "project"
+                            }
+                            queue.append((sid, d + 1))
         
         return {
             "success": True,
             "node_count": len(nodes),
+            "edge_count": len(edges),
             "nodes": list(nodes.values()),
+            "edges": edges
+        }
+
+    # ── Full Graph (Obsidian-style global view) ──
+    def get_full_graph(self, max_nodes: int = 200) -> Dict[str, Any]:
+        """Return all non-fragment knowledge nodes and their edges for visualization."""
+        SKIP_SOURCES = {"extracted_entity", "asset_extraction"}
+        
+        all_nodes = self.db.query(KnowledgeNode).filter(
+            KnowledgeNode.workspace_id == self.workspace_id,
+            KnowledgeNode.is_archived == False
+        ).order_by(KnowledgeNode.updated_at.desc()).limit(max_nodes * 2).all()
+        
+        nodes = []
+        node_ids = set()
+        for node in all_nodes:
+            if node.source_type in SKIP_SOURCES:
+                continue
+            if not node.title or len(node.title.strip()) < 3:
+                continue
+            nt = self.db.query(NodeType).filter(NodeType.id == node.node_type_id).first()
+            nodes.append({
+                "id": node.id,
+                "title": node.title,
+                "slug": node.slug,
+                "type": nt.name if nt else "unknown",
+                "type_display": nt.display_name if nt else "Unknown",
+                "layer": node.layer or "project",
+                "source_type": node.source_type or ""
+            })
+            node_ids.add(node.id)
+            if len(nodes) >= max_nodes:
+                break
+        
+        edges = []
+        if node_ids:
+            db_edges = self.db.query(KnowledgeEdge).filter(
+                KnowledgeEdge.workspace_id == self.workspace_id,
+                KnowledgeEdge.is_archived == False,
+                KnowledgeEdge.source_id.in_(node_ids),
+                KnowledgeEdge.target_id.in_(node_ids)
+            ).all()
+            
+            for edge in db_edges:
+                rel_type = self.db.query(RelationshipType).filter(
+                    RelationshipType.id == edge.relationship_type_id
+                ).first()
+                edges.append({
+                    "id": edge.id,
+                    "source": edge.source_id,
+                    "target": edge.target_id,
+                    "relationship_type": rel_type.name if rel_type else "related",
+                    "relationship_display": rel_type.display_name if rel_type else "Related",
+                    "confidence": edge.confidence or 1.0
+                })
+        
+        return {
+            "success": True,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "nodes": nodes,
             "edges": edges
         }
     
