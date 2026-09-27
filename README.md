@@ -4,7 +4,7 @@ An intelligent, memory-augmented AI companion that acts as your Chief of Staff. 
 
 ## Architecture
 
-Sage is built around **20 engineering phases** covering everything from event buses and memory engines to predictions, security, and infrastructure. See the `Phase-01-Foundation.md` through `Phase-20-Roadmap.md` files for the full architecture specification.
+Sage is being built around **20 engineering phases** covering everything from event buses and memory engines to predictions, security, and infrastructure. See the `Phase-01-Foundation.md` through `Phase-20-Roadmap.md` files for the full architecture specification.
 
 ## Tech Stack
 
