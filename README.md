@@ -2,6 +2,8 @@
 
 An intelligent, memory-augmented AI companion that acts as your Chief of Staff. Sage learns from your documents, tracks your projects, and helps you make better decisions through a knowledge graph, episodic memory, and multi-phase reasoning engine.
 
+> **Sage is an active engineering project rather than a finished personal AI system. Several core components have been implemented, but the current system does not yet fully deliver the behavior envisioned in the complete architecture. The repository documents both the implemented infrastructure and the staged development roadmap.**
+
 ## Architecture
 
 Sage is being built around **20 engineering phases** covering everything from event buses and memory engines to predictions, security, and infrastructure. See the `Phase-01-Foundation.md` through `Phase-20-Roadmap.md` files for the full architecture specification.
@@ -96,7 +98,7 @@ sage-core/
 ├── sage/                         # Core Python modules
 │   ├── core/                     # Event bus, LLM router, topology
 │   └── services/                 # Memory, context, reasoning engines
-├── interview/                    # Architecture decision docs
+
 ├── Phase-01-Foundation.md      # Engineering handbook (20 phases)
 ├── ...
 └── Start-Sage-v4.ps1           # Windows launcher
